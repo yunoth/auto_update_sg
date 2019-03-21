@@ -4,16 +4,18 @@ import hashlib
 import json
 import urllib2
 
+print("boto3 version:"+boto3.__version__)
+
 # Name of the service, as seen in the ip-groups.json file, to extract information for
-SERVICE = "s3"
+SERVICE = "S3"
 # Ports your application uses that need inbound permissions from the service for
-INGRESS_PORTS = { 'Http' : 80, 'Https': 443 }
+EGRESS_PORTS = { 'Https': 443 }
 # Tags which identify the security groups you want to update
-SECURITY_GROUP_TAG_FOR_REGION_HTTPS = { 'Name': 's3_access', 'AutoUpdate': 'true', 'Protocol': 'https' }
+SECURITY_GROUP_TAG_FOR_REGION_HTTPS = { 'Name': 's3_access', 'autoupdate': 'true', 'protocol': 'https' }
 
 
 def lambda_handler(event, context):
-    print("Received event: " + json.dumps(event, indent=2))
+    #print("Received event: " + json.dumps(event, indent=2))
     message = json.loads(event['Records'][0]['Sns']['Message'])
 
     # Load the ip ranges from the url
@@ -21,7 +23,8 @@ def lambda_handler(event, context):
 
     # extract the service ranges
     #global_cf_ranges = get_ranges_for_service(ip_ranges, SERVICE, "GLOBAL")
-    region_cf_ranges = get_ranges_for_service(ip_ranges, SERVICE, "REGION")
+    region_cf_ranges = get_ranges_for_service(ip_ranges, SERVICE, "us-east-1")
+
     ip_ranges = { "REGION": region_cf_ranges }
 
     # update the security groups
@@ -45,15 +48,19 @@ def get_ip_groups_json(url, expected_hash):
     return ip_json
 
 def get_ranges_for_service(ranges, service, subset):
+
     service_ranges = list()
     for prefix in ranges['prefixes']:
-        if prefix['service'] == service and ((subset == prefix['region'] and subset == "GLOBAL") or (subset != 'GLOBAL' and prefix['region'] != 'GLOBAL')):
+
+        #if prefix['service'] == service and ((subset == prefix['region'] and subset == "GLOBAL") or (subset != 'GLOBAL' and prefix['region'] != 'GLOBAL')):
+        if prefix['service'] == service and subset == prefix['region']:
             print('Found ' + service + ' region: ' + prefix['region'] + ' range: ' + prefix['ip_prefix'])
             service_ranges.append(prefix['ip_prefix'])
 
     return service_ranges
 
 def update_security_groups(new_ranges):
+
     client = boto3.client('ec2')
 
     region_https_group = get_security_groups_for_update(client, SECURITY_GROUP_TAG_FOR_REGION_HTTPS)
@@ -65,7 +72,7 @@ def update_security_groups(new_ranges):
     region_https_updated = 0
 
     for group in region_https_group:
-        if update_security_group(client, group, new_ranges["REGION"], INGRESS_PORTS['Https']):
+        if update_security_group(client, group, new_ranges["REGION"], EGRESS_PORTS['Https']):
             region_https_updated += 1
             result.append('Updated ' + group['GroupId'])
 
@@ -77,12 +84,13 @@ def update_security_group(client, group, new_ranges, port):
     added = 0
     removed = 0
 
-    if len(group['IpPermissions']) > 0:
-        for permission in group['IpPermissions']:
+    if len(group['IpPermissionsEgress']) > 0:
+        for permission in group['IpPermissionsEgress']:
             if permission['FromPort'] <= port and permission['ToPort'] >= port :
                 old_prefixes = list()
                 to_revoke = list()
                 to_add = list()
+                print (permission['IpRanges'])
                 for range in permission['IpRanges']:
                     cidr = range['CidrIp']
                     old_prefixes.append(cidr)
@@ -100,7 +108,7 @@ def update_security_group(client, group, new_ranges, port):
     else:
         to_add = list()
         for range in new_ranges:
-            to_add.append({ 'CidrIp': range })
+            to_add.append({ 'CidrIp': range, 'Description' : 's3 access' })
             print(group['GroupId'] + ": Adding " + range + ":" + str(port))
         permission = { 'ToPort': port, 'FromPort': port, 'IpProtocol': 'tcp'}
         added += add_permissions(client, group, permission, to_add)
@@ -117,12 +125,13 @@ def revoke_permissions(client, group, permission, to_revoke):
             'IpProtocol': permission['IpProtocol']
         }
 
-        client.revoke_security_group_ingress(GroupId=group['GroupId'], IpPermissions=[revoke_params])
+        client.revoke_security_group_egress(GroupId=group['GroupId'], IpPermissions=[revoke_params])
 
     return len(to_revoke)
 
 def add_permissions(client, group, permission, to_add):
     if len(to_add) > 0:
+
         add_params = {
             'ToPort': permission['ToPort'],
             'FromPort': permission['FromPort'],
@@ -130,7 +139,7 @@ def add_permissions(client, group, permission, to_add):
             'IpProtocol': permission['IpProtocol']
         }
 
-        client.authorize_security_group_ingress(GroupId=group['GroupId'], IpPermissions=[add_params])
+        client.authorize_security_group_egress(GroupId=group['GroupId'], IpPermissions=[add_params])
 
     return len(to_add)
 
